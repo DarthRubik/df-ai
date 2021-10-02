@@ -32,15 +32,6 @@ int32_t Stocks::count_manager_orders_matcat(const df::job_material_category & ma
             cnt += mo->amount_left;
         }
     }
-    events.each_exclusive<ManagerOrderExclusive>([&cnt, matcat, order](const ManagerOrderExclusive *excl) -> bool
-    {
-        if (excl->tmpl.material_category.whole == matcat.whole && excl->tmpl.job_type != order)
-        {
-            cnt += excl->amount;
-        }
-
-        return false;
-    });
 
     return cnt;
 }
@@ -80,152 +71,8 @@ int32_t Stocks::count_manager_orders(color_ostream &, const df::manager_order_te
             amount += mo->amount_left;
         }
     }
-    events.each_exclusive<ManagerOrderExclusive>([&amount, tmpl](const ManagerOrderExclusive *excl) -> bool
-    {
-        if (template_equals(&excl->tmpl, &tmpl))
-        {
-            amount += excl->amount;
-        }
-
-        return false;
-    });
 
     return amount;
-}
-
-ManagerOrderExclusive::ManagerOrderExclusive(AI & ai, const df::manager_order_template & tmpl, int32_t amount)
-    : ExclusiveCallback{ "add_manager_order: " + AI::describe_job(&tmpl) },
-    ai(ai),
-    tmpl(tmpl),
-    amount(amount),
-    search_word()
-{
-    search_word = AI::describe_job(&tmpl);
-    size_t pos = search_word.find(' ');
-    if (pos != std::string::npos)
-    {
-        if (search_word.substr(0, pos) == "Smelt" && search_word.substr(search_word.length() - 4) == " Ore")
-        {
-            size_t pos2 = search_word.rfind(' ');
-            pos = search_word.rfind(' ', pos2);
-            search_word = search_word.substr(pos, pos2 - pos);
-        }
-        else if ((search_word.substr(0, pos) == "Construct" || search_word.substr(0, pos) == "Make" || search_word.substr(0, pos) == "Prepare" || search_word.substr(0, pos) == "Forge") && isalpha(search_word.at(search_word.length() - 1)))
-        {
-            pos = search_word.rfind(' ');
-            search_word = search_word.substr(pos);
-        }
-        else
-        {
-            search_word = search_word.substr(0, pos);
-        }
-    }
-}
-
-void ManagerOrderExclusive::Run(color_ostream & out)
-{
-    ExpectScreen<df::viewscreen_dwarfmodest>("dwarfmode/Default");
-    Key(interface_key::D_JOBLIST);
-    ExpectScreen<df::viewscreen_joblistst>("joblist");
-    Key(interface_key::UNITJOB_MANAGER);
-
-    {
-        ExpectScreen<df::viewscreen_jobmanagementst>("jobmanagement/Main");
-        ExpectedScreen<df::viewscreen_jobmanagementst> view(this);
-
-        bool first = true;
-        bool multiple = false;
-        int32_t old_order = -1;
-        for (auto it = world->manager_orders.begin(); it != world->manager_orders.end(); it++)
-        {
-            if (template_equals(*it, &tmpl))
-            {
-                if (first)
-                {
-                    first = false;
-                }
-                else if ((*it)->amount_left == (*it)->amount_total)
-                {
-                    old_order = int32_t(it - world->manager_orders.begin());
-                    amount += (*it)->amount_left;
-                    multiple = true;
-                    break;
-                }
-            }
-        }
-
-        if (multiple)
-        {
-            MoveToItem(&view->sel_idx, old_order);
-
-            Key(interface_key::MANAGER_REMOVE);
-        }
-    }
-
-    auto quantity = stl_sprintf("%d", std::min(amount, 9999));
-
-    Key(interface_key::MANAGER_NEW_ORDER);
-
-    {
-        ExpectScreen<df::viewscreen_createquotast>("createquota");
-        ExpectedScreen<df::viewscreen_createquotast> view(this);
-
-        int32_t idx = -1;
-        df::manager_order_template *target = nullptr;
-        auto find_target = [&]() -> bool
-        {
-            for (auto it = view->orders.begin(); it != view->orders.end(); it++)
-            {
-                if (template_equals<df::manager_order_template>(*it, &tmpl))
-                {
-                    idx = it - view->orders.begin();
-                    target = *it;
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        if (!find_target())
-        {
-            target = df::allocate<df::manager_order_template>();
-            *target = tmpl;
-            idx = int32_t(view->orders.size());
-            view->orders.push_back(target);
-            view->all_orders.push_back(target);
-        }
-
-        EnterString(&view->str_filter, search_word);
-
-        while (!find_target() && view->str_filter[0])
-        {
-            Key(interface_key::STRING_A000);
-        }
-
-        if (!find_target())
-        {
-            ai.debug(out, "[CHEAT] Failed to get a manager order for " + AI::describe_job(&tmpl) + "; forcing it.");
-            *view->orders.at(0) = tmpl;
-        }
-        else
-        {
-            MoveToItem(&view->sel_idx, idx, interface_key::STANDARDSCROLL_PAGEDOWN, interface_key::STANDARDSCROLL_UP);
-        }
-
-        Key(interface_key::SELECT);
-
-        EnterString(&view->str_quantity, quantity);
-    }
-
-    Key(interface_key::SELECT);
-
-    ai.debug(out, "add_manager_order(" + quantity + ") " + AI::describe_job(&tmpl));
-
-    ExpectScreen<df::viewscreen_jobmanagementst>("jobmanagement/Main");
-    Key(interface_key::LEAVESCREEN);
-    ExpectScreen<df::viewscreen_joblistst>("joblist");
-    Key(interface_key::LEAVESCREEN);
-    ExpectScreen<df::viewscreen_dwarfmodest>("dwarfmode/Default");
 }
 
 void Stocks::add_manager_order(color_ostream & out, const df::manager_order_template & tmpl, int32_t amount)
@@ -255,6 +102,22 @@ void Stocks::add_manager_order(color_ostream & out, const df::manager_order_temp
         return;
     }
 
-    reason << "queued manager order (" << amount << "): " << AI::describe_job(&tmpl);
-    events.queue_exclusive(std::make_unique<ManagerOrderExclusive>(ai, tmpl, amount));
+    ai.debug(out, stl_sprintf("add_manager_order(%d) %s",amount , AI::describe_job(&tmpl).c_str()));
+    df::manager_order* new_order = df::allocate<df::manager_order>();
+
+    new_order->amount_left = amount;
+    new_order->amount_total = amount;
+
+    new_order->id = world->manager_order_next_id++;
+    new_order->job_type = tmpl.job_type;
+    new_order->reaction_name = tmpl.reaction_name;
+    new_order->item_type = tmpl.item_type;
+    new_order->item_subtype = tmpl.item_subtype;
+    new_order->mat_type = tmpl.mat_type;
+    new_order->mat_index = tmpl.mat_index;
+    new_order->item_category = tmpl.item_category;
+    new_order->hist_figure_id = tmpl.hist_figure_id;
+    new_order->material_category = tmpl.material_category;
+
+    world->manager_orders.push_back(new_order);
 }
